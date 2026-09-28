@@ -199,6 +199,26 @@ zone_data, anomalies, raw = load_data()
 
 TOTAL_RECORDS = len(raw)
 
+anomalies["timestamp"] = pd.to_datetime(anomalies["timestamp"])
+anomalies = anomalies.sort_values("timestamp", ascending=False).reset_index(drop=True)
+
+def anomaly_reason(row):
+    reasons = []
+    if row["traffic"] >= 2500:
+        reasons.append("🚗 Traffic Spike")
+    if row["aqi"] >= 140:
+        reasons.append("🌫️ AQI Spike")
+    if row["activity"] >= 2000:
+        reasons.append("👥 Activity Surge")
+    return " • ".join(reasons) if reasons else "⚠️ Unusual Pattern"
+
+def get_status(score):
+    if score >= 70:
+        return "Stable"
+    elif score >= 50:
+        return "Watch"
+    return "Attention"
+
 # ============================================================
 # CITY PULSE SCORE
 # Project-defined index based on traffic, AQI and anomaly levels
@@ -293,7 +313,7 @@ st.markdown("""
 
 if selected_zone == "All Zones":
     selected_zone_data = zone_metrics
-    selected_anomalies = anomalies
+    selected_anomalies = anomalies.sort_values("timestamp", ascending=False)
     pulse_value = city_pulse
 else:
     selected_zone_data = zone_metrics[
@@ -301,7 +321,7 @@ else:
     ]
     selected_anomalies = anomalies[
         anomalies["zone"] == selected_zone
-    ]
+    ].sort_values("timestamp", ascending=False)
     pulse_value = int(selected_zone_data["pulse_score"].iloc[0])
 
 avg_aqi = selected_zone_data["avg_aqi"].mean()
@@ -401,25 +421,21 @@ with right:
     for i, (_, row) in enumerate(zone_metrics.iterrows()):
         score = int(row["pulse_score"])
 
-        if score >= 70:
-            status = "● Stable"
-        elif score >= 50:
-            status = "● Watch"
-        else:
-            status = "● Attention"
+        status = get_status(score)
 
         with zone_cols[i]:
             st.markdown(
                 f"""
-                <div class="zone">
-                    <div class="zone-name">{row["zone"]}</div>
-                    <div class="zone-meta">{status}</div>
-                    <br>
-                    <div class="zone-meta">🚗 {row["avg_traffic"]:.0f}</div>
-                    <div class="zone-meta">🌫️ {row["avg_aqi"]:.0f}</div>
-                    <div class="zone-meta">⚡ {row["avg_energy"]:.0f}</div>
-                    <div class="zone-meta">👥 {row["avg_activity"]:.0f}</div>
-                </div>
+<div class="zone">
+    <div class="zone-name">{row["zone"]}</div>
+    <div class="zone-meta">● {status}</div>
+    <br>
+    <div class="zone-meta">🚗 {row["avg_traffic"]:.0f}</div>
+    <div class="zone-meta">🌫️ {row["avg_aqi"]:.0f}</div>
+    <div class="zone-meta">⚡ {row["avg_energy"]:.0f}</div>
+    <div class="zone-meta">👥 {row["avg_activity"]:.0f}</div>
+    <div class="zone-meta">🚨 Alerts: {int(row["alerts"])}</div>
+</div>
                 """,
                 unsafe_allow_html=True,
             )
@@ -439,17 +455,24 @@ if selected_zone != "All Zones":
         trend_raw["zone"] == selected_zone
     ]
 
-trend = (
-    trend_raw.set_index("timestamp")
-    .resample("6h")
-    .agg(
-        traffic=("traffic", "mean"),
-        aqi=("aqi", "mean"),
-        energy=("energy", "mean"),
-        activity=("activity", "mean"),
-    )
-    .dropna()
+range_choice = st.selectbox(
+    "Time Range",
+    ["Last 7 Days", "Last 30 Days", "Last 90 Days", "Full Year"],
+    index=1,
 )
+
+end_time = trend_raw["timestamp"].max()
+range_days = {
+    "Last 7 Days": 7,
+    "Last 30 Days": 30,
+    "Last 90 Days": 90,
+    "Full Year": None,
+}
+days = range_days[range_choice]
+
+if days is not None:
+    cutoff = end_time - pd.Timedelta(days=days)
+    trend_raw = trend_raw[trend_raw["timestamp"] >= cutoff]
 
 metric_column = {
     "Traffic": "traffic",
@@ -458,15 +481,17 @@ metric_column = {
     "Activity": "activity",
 }[metric]
 
-st.markdown(
-    f"**{metric} over time**",
-    unsafe_allow_html=False,
+frequency = "6h" if days is not None else "1D"
+trend = (
+    trend_raw.set_index("timestamp")[metric_column]
+    .resample(frequency)
+    .mean()
+    .dropna()
 )
 
-st.line_chart(
-    trend[metric_column],
-    height=300,
-)
+st.markdown(f"**{metric} over time**")
+st.line_chart(trend, height=300)
+st.caption(f"{range_choice} • {selected_zone}")
 
 # ============================================================
 # ALERTS + DETAIL
@@ -484,32 +509,25 @@ with left:
         st.success("No anomalies detected.")
     else:
         for _, row in selected_anomalies.head(6).iterrows():
-            if (
-                row["traffic"] >= 2500
-                or row["aqi"] >= 140
-                or row["activity"] >= 2000
-            ):
-                level = "HIGH PRIORITY"
-            else:
-                level = "MONITOR"
+            reason = anomaly_reason(row)
 
             st.markdown(
                 f"""
-                <div class="alert">
-                    <div class="alert-title">
-                        🚨 {level} — {row["zone"]}
-                    </div>
-                    <div class="alert-meta">
-                        {row["timestamp"]}
-                    </div>
-                    <div class="alert-meta">
-                        🚗 Traffic {row["traffic"]}
-                        &nbsp; | &nbsp;
-                        🌫️ AQI {row["aqi"]}
-                        &nbsp; | &nbsp;
-                        👥 Activity {row["activity"]}
-                    </div>
-                </div>
+<div class="alert">
+    <div class="alert-title">
+        🚨 {reason} — {row["zone"]}
+    </div>
+    <div class="alert-meta">
+        🕒 {row["timestamp"]}
+    </div>
+    <div class="alert-meta">
+        🚗 Traffic {row["traffic"]}
+        &nbsp; | &nbsp;
+        🌫️ AQI {row["aqi"]}
+        &nbsp; | &nbsp;
+        👥 Activity {row["activity"]}
+    </div>
+</div>
                 """,
                 unsafe_allow_html=True,
             )
@@ -520,17 +538,21 @@ with right:
         unsafe_allow_html=True,
     )
 
+    metrics_view = selected_zone_data.copy()
+    metrics_view["status"] = metrics_view["pulse_score"].apply(get_status)
+
     display_columns = [
         "zone",
         "avg_traffic",
         "avg_aqi",
         "avg_energy",
         "avg_activity",
-        "pulse_score",
+        "alerts",
+        "status",
     ]
 
     st.dataframe(
-        selected_zone_data[display_columns],
+        metrics_view[display_columns],
         width="stretch",
         hide_index=True,
     )
